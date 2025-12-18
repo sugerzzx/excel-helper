@@ -1,0 +1,19 @@
+[package]
+name = "excel-helper"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+calamine = { version = "0.24", features = ["dates"] }
+chrono = { version = "0.4", default-features = false, features = [
+  "clock",
+  "std",
+] }
+eframe = { version = "0.27", default-features = false, features = [
+  "wgpu",
+  "default_fonts",
+] }
+poll-promise = "0.3"
+rfd = "0.14"
+rust_xlsxwriter = "0.69"
