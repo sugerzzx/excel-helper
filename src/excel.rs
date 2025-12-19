@@ -4,19 +4,36 @@ use anyhow::{Context, Result, anyhow};
 use calamine::{Data, Reader, open_workbook_auto};
 use rust_xlsxwriter::Workbook;
 
-/// Metadata that describes the generated files along with a few helpful stats.
+/// Metadata describing the generated files and helpful stats for the UI.
 pub struct SplitResult {
-    pub first_file: PathBuf,
-    pub second_file: PathBuf,
     pub total_rows: usize,
-    pub first_segment_rows: usize,
-    pub second_segment_rows: usize,
+    pub header_rows: usize,
+    pub chunks: Vec<SplitChunk>,
 }
 
-/// Splits the first worksheet of the given Excel file into two new files while keeping the header.
-pub fn split_excel_file(source: &Path, chunk_size: usize) -> Result<SplitResult> {
+/// Metadata for a single output file.
+pub struct SplitChunk {
+    pub file_path: PathBuf,
+    pub total_rows: usize,
+    pub data_rows: usize,
+}
+
+/// Splits the first worksheet of the given Excel file into multiple files while keeping the header.
+pub fn split_excel_file(
+    source: &Path,
+    chunk_size: usize,
+    header_rows: usize,
+) -> Result<SplitResult> {
     if chunk_size == 0 {
         return Err(anyhow!("拆分的行数必须大于 0"));
+    }
+
+    if header_rows == 0 {
+        return Err(anyhow!("表头行数必须大于 0"));
+    }
+
+    if chunk_size <= header_rows {
+        return Err(anyhow!("拆分行数必须大于表头行数"));
     }
 
     let mut workbook = open_workbook_auto(source)
@@ -32,43 +49,73 @@ pub fn split_excel_file(source: &Path, chunk_size: usize) -> Result<SplitResult>
         .worksheet_range(&sheet_name)
         .with_context(|| format!("无法读取工作表 {sheet_name}"))?;
 
-    let mut rows = range.rows();
-    let header_row = rows.next().ok_or_else(|| anyhow!("工作表为空，缺少表头"))?;
-    let header = convert_row(header_row);
+    let rows: Vec<Vec<String>> = range.rows().map(convert_row).collect();
+    if rows.len() < header_rows {
+        return Err(anyhow!("工作表的行数小于指定的表头行数"));
+    }
 
-    let data_rows: Vec<Vec<String>> = rows.map(convert_row).collect();
-    let total_rows = data_rows.len();
+    let header = rows[..header_rows].to_vec();
+    let data_rows = rows[header_rows..].to_vec();
+    let total_rows = rows.len();
 
-    let split_index = chunk_size.min(total_rows);
-    let (first_segment, second_segment) = data_rows.split_at(split_index);
+    let data_capacity = chunk_size - header_rows;
+    let mut chunks = Vec::new();
 
-    let first_path = build_output_path(source, "part1");
-    let second_path = build_output_path(source, "part2");
-
-    write_segment(&first_path, &header, first_segment)?;
-    write_segment(&second_path, &header, second_segment)?;
+    if data_rows.is_empty() {
+        let path = build_output_path(source, 1);
+        write_chunk(&path, &header, &[])?;
+        chunks.push(SplitChunk {
+            file_path: path,
+            total_rows: header_rows,
+            data_rows: 0,
+        });
+    } else {
+        let mut start = 0;
+        let mut index = 1;
+        while start < data_rows.len() {
+            let end = (start + data_capacity).min(data_rows.len());
+            let chunk_data = &data_rows[start..end];
+            let path = build_output_path(source, index);
+            write_chunk(&path, &header, chunk_data)?;
+            chunks.push(SplitChunk {
+                file_path: path,
+                total_rows: header_rows + chunk_data.len(),
+                data_rows: chunk_data.len(),
+            });
+            start = end;
+            index += 1;
+        }
+    }
 
     Ok(SplitResult {
-        first_file: first_path,
-        second_file: second_path,
         total_rows,
-        first_segment_rows: first_segment.len(),
-        second_segment_rows: second_segment.len(),
+        header_rows,
+        chunks,
     })
 }
 
-fn write_segment(destination: &Path, header: &[String], rows: &[Vec<String>]) -> Result<()> {
+fn write_chunk(
+    destination: &Path,
+    header_rows: &[Vec<String>],
+    data_rows: &[Vec<String>],
+) -> Result<()> {
     let mut workbook = Workbook::new();
     let worksheet = workbook.add_worksheet();
 
-    for (col_idx, value) in header.iter().enumerate() {
-        worksheet.write_string(0, col_idx as u16, value)?;
+    let mut current_row: u32 = 0;
+
+    for header_row in header_rows {
+        for (col_idx, value) in header_row.iter().enumerate() {
+            worksheet.write_string(current_row, col_idx as u16, value)?;
+        }
+        current_row += 1;
     }
 
-    for (row_idx, row) in rows.iter().enumerate() {
-        for (col_idx, value) in row.iter().enumerate() {
-            worksheet.write_string((row_idx + 1) as u32, col_idx as u16, value)?;
+    for data_row in data_rows {
+        for (col_idx, value) in data_row.iter().enumerate() {
+            worksheet.write_string(current_row, col_idx as u16, value)?;
         }
+        current_row += 1;
     }
 
     workbook.save(destination)?;
@@ -125,7 +172,7 @@ fn format_float(value: f64) -> String {
     }
 }
 
-fn build_output_path(source: &Path, suffix: &str) -> PathBuf {
+fn build_output_path(source: &Path, index: usize) -> PathBuf {
     let parent = source
         .parent()
         .map(Path::to_path_buf)
@@ -134,5 +181,5 @@ fn build_output_path(source: &Path, suffix: &str) -> PathBuf {
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("split");
-    parent.join(format!("{stem}_{suffix}.xlsx"))
+    parent.join(format!("{stem}_part{index}.xlsx"))
 }

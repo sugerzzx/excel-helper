@@ -12,6 +12,7 @@ use crate::excel::{SplitResult, split_excel_file};
 use std::fs;
 
 pub struct ExcelHelperApp {
+    header_row_input: String,
     row_count_input: String,
     selected_file: Option<PathBuf>,
     status: StatusMessage,
@@ -22,6 +23,7 @@ pub struct ExcelHelperApp {
 impl Default for ExcelHelperApp {
     fn default() -> Self {
         Self {
+            header_row_input: "1".into(),
             row_count_input: "500".into(),
             selected_file: None,
             status: StatusMessage::Idle,
@@ -89,6 +91,14 @@ impl ExcelHelperApp {
             }
         };
 
+        let header_rows = match self.parse_header_rows() {
+            Ok(value) => value,
+            Err(msg) => {
+                self.status = StatusMessage::error(msg);
+                return;
+            }
+        };
+
         let row_limit = match self.parse_row_limit() {
             Ok(value) => value,
             Err(msg) => {
@@ -97,10 +107,32 @@ impl ExcelHelperApp {
             }
         };
 
-        let promise =
-            Promise::spawn_thread("excel-split", move || split_excel_file(&path, row_limit));
+        if row_limit <= header_rows {
+            self.status = StatusMessage::error("拆分行数必须大于表头行数");
+            return;
+        }
+
+        let promise = Promise::spawn_thread("excel-split", move || {
+            split_excel_file(&path, row_limit, header_rows)
+        });
         self.split_promise = Some(promise);
         self.status = StatusMessage::info("正在拆分，请稍候...");
+    }
+
+    fn parse_header_rows(&self) -> Result<usize, String> {
+        let trimmed = self.header_row_input.trim();
+        if trimmed.is_empty() {
+            return Err("请输入表头行数".into());
+        }
+
+        let value: usize = trimmed
+            .parse()
+            .map_err(|_| "表头行数必须是正整数".to_string())?;
+        if value == 0 {
+            return Err("表头行数必须大于 0".into());
+        }
+
+        Ok(value)
     }
 
     fn parse_row_limit(&self) -> Result<usize, String> {
@@ -134,14 +166,23 @@ impl ExcelHelperApp {
     }
 
     fn handle_success(&mut self, summary: SplitResult) {
-        let message = format!(
-            "拆分完成，共 {} 行。\n第一部分: {} 行 -> {}\n第二部分: {} 行 -> {}",
+        let mut message = format!(
+            "拆分完成，共 {} 行（其中表头 {} 行）。\n生成 {} 个文件：",
             summary.total_rows,
-            summary.first_segment_rows,
-            summary.first_file.display(),
-            summary.second_segment_rows,
-            summary.second_file.display()
+            summary.header_rows,
+            summary.chunks.len()
         );
+
+        for (idx, chunk) in summary.chunks.iter().enumerate() {
+            message.push_str(&format!(
+                "\n第{}部分: {} 行（数据 {} 行） -> {}",
+                idx + 1,
+                chunk.total_rows,
+                chunk.data_rows,
+                chunk.file_path.display()
+            ));
+        }
+
         self.status = StatusMessage::success(message);
     }
 }
@@ -153,8 +194,16 @@ impl App for ExcelHelperApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("Excel 拆分助手");
-            ui.label("输入单个文件的最大行数，程序会把原始表拆成两个文件并保留表头。");
+            ui.label("输入表头行数和单个文件的最大行数，程序会把表格按需拆成多个文件并保留表头。");
             ui.separator();
+
+            ui.horizontal(|ui| {
+                ui.label("表头行数：");
+                let edit = TextEdit::singleline(&mut self.header_row_input)
+                    .hint_text("例如 2")
+                    .desired_width(120.0);
+                ui.add(edit);
+            });
 
             ui.horizontal(|ui| {
                 ui.label("拆分行数：");
