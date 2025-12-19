@@ -17,3 +17,5 @@ eframe = { version = "0.27", default-features = false, features = [
 poll-promise = "0.3"
 rfd = "0.14"
 rust_xlsxwriter = "0.69"
+quick-xml = "0.31"
+zip = { version = "2.1", default-features = false, features = ["deflate"] }
